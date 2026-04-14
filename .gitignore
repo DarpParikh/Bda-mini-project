@@ -1,0 +1,13 @@
+# Python environments
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# OS/editor artifacts
+.DS_Store
+Thumbs.db
+.vscode/
