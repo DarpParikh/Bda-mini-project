@@ -4,6 +4,11 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 try:
+    import plotly.express as px
+except Exception:
+    px = None
+
+try:
     import seaborn as sns
 except Exception:
     sns = None
@@ -144,13 +149,19 @@ def compute_ml_insights(frame: pd.DataFrame) -> tuple[float | None, pd.DataFrame
     x = ml_df[["Latitude", "Longitude", "Hour"]]
     y = LabelEncoder().fit_transform(ml_df["Crime Description"].astype(str))
 
-    x_train, x_test, y_train, y_test = train_test_split(
-        x,
-        y,
-        test_size=0.2,
-        random_state=42,
-        stratify=y,
-    )
+    class_counts = pd.Series(y).value_counts()
+    stratify_target = y if class_counts.min() >= 2 else None
+
+    try:
+        x_train, x_test, y_train, y_test = train_test_split(
+            x,
+            y,
+            test_size=0.2,
+            random_state=42,
+            stratify=stratify_target,
+        )
+    except Exception:
+        return None, pd.DataFrame(columns=["Feature", "Importance"])
 
     model = RandomForestClassifier(n_estimators=150, random_state=42)
     model.fit(x_train, y_train)
@@ -165,6 +176,114 @@ def compute_ml_insights(frame: pd.DataFrame) -> tuple[float | None, pd.DataFrame
     ).sort_values("Importance", ascending=False)
 
     return accuracy, importance_df
+
+
+def build_cluster_color_map(cluster_ids: list[int]) -> dict[int, list[int]]:
+    palette = {}
+    for idx, cluster_id in enumerate(sorted(cluster_ids)):
+        palette[cluster_id] = [
+            int((idx * 67) % 255),
+            int((idx * 131 + 80) % 255),
+            int((idx * 193 + 160) % 255),
+            200,
+        ]
+    return palette
+
+
+def show_optional_dependency_warning() -> None:
+    if not st.session_state.get("_optional_dependency_warning_shown", False):
+        st.session_state["_optional_dependency_warning_shown"] = True
+        st.warning("Optional dependency missing. Please install scikit-learn or pydeck.")
+
+
+def render_feature_importance_chart(importance_df: pd.DataFrame) -> None:
+    if importance_df.empty:
+        st.info("Not enough data diversity to train RandomForest.")
+        return
+
+    if px is not None:
+        fig = px.bar(
+            importance_df.sort_values("Importance", ascending=True),
+            x="Importance",
+            y="Feature",
+            orientation="h",
+            title="RandomForest Feature Importance",
+        )
+        fig.update_layout(
+            xaxis_title="Importance",
+            yaxis_title="Feature",
+            margin=dict(l=10, r=10, t=50, b=10),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.bar_chart(importance_df.set_index("Feature")["Importance"])
+
+
+def render_cluster_visualization(cluster_df: pd.DataFrame) -> None:
+    if cluster_df.empty:
+        st.info("Not enough data points for clustering.")
+        return
+
+    cluster_df = cluster_df.copy()
+    cluster_df["Cluster Label"] = cluster_df["Cluster"].astype(str)
+
+    cluster_summary = (
+        cluster_df.groupby("Cluster")
+        .agg(
+            Records=("Cluster", "size"),
+            AvgLatitude=("Latitude", "mean"),
+            AvgLongitude=("Longitude", "mean"),
+        )
+        .reset_index()
+        .sort_values("Cluster")
+    )
+
+    st.subheader("Cluster Summary")
+    st.dataframe(cluster_summary, width="stretch")
+
+    if pdk is not None:
+        cluster_palette = build_cluster_color_map(cluster_df["Cluster"].unique().tolist())
+        cluster_df = cluster_df.copy()
+        cluster_df["ClusterColor"] = cluster_df["Cluster"].map(cluster_palette)
+
+        view_state = pdk.ViewState(
+            latitude=float(cluster_df["Latitude"].mean()),
+            longitude=float(cluster_df["Longitude"].mean()),
+            zoom=10,
+            pitch=35,
+        )
+        cluster_layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=cluster_df,
+            get_position="[Longitude, Latitude]",
+            get_fill_color="ClusterColor",
+            get_radius=170,
+            pickable=True,
+        )
+        st.pydeck_chart(
+            pdk.Deck(
+                map_style="mapbox://styles/mapbox/light-v10",
+                initial_view_state=view_state,
+                layers=[cluster_layer],
+                tooltip={"text": "Cluster: {Cluster}\nCrime: {Crime Description}\nHour: {Hour}"},
+            )
+        )
+        return
+
+    if px is not None:
+        fig = px.scatter(
+            cluster_df,
+            x="Longitude",
+            y="Latitude",
+            color="Cluster Label",
+            hover_data={"Crime Description": True, "Hour": True, "Cluster": True, "Latitude": False, "Longitude": False},
+            title="Crime Clusters by Latitude and Longitude",
+            labels={"Cluster Label": "Cluster", "Longitude": "Longitude", "Latitude": "Latitude"},
+        )
+        fig.update_layout(margin=dict(l=10, r=10, t=50, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.scatter_chart(cluster_df[["Longitude", "Latitude"]])
 
 
 # ----------------------------
@@ -395,7 +514,19 @@ with tab_visual:
         st.subheader("Top 10 Crime Types")
         try:
             top_crimes = filtered_df["Crime Description"].value_counts().head(10)
-            st.bar_chart(top_crimes)
+            if px is not None:
+                top_crimes_df = top_crimes.reset_index()
+                top_crimes_df.columns = ["Crime Description", "Count"]
+                fig = px.bar(
+                    top_crimes_df,
+                    x="Crime Description",
+                    y="Count",
+                    title="Top 10 Crime Types",
+                )
+                fig.update_layout(xaxis_title="Crime Description", yaxis_title="Count", margin=dict(l=10, r=10, t=50, b=10))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.bar_chart(top_crimes)
         except Exception as err:
             st.error(f"Bar chart rendering failed: {err}")
 
@@ -420,7 +551,19 @@ with tab_visual:
                 },
                 index=hour_counts.index,
             )
-            st.line_chart(trend_frame)
+            if px is not None:
+                trend_plot = trend_frame.reset_index().rename(columns={"index": "Hour"})
+                fig = px.line(
+                    trend_plot,
+                    x="Hour",
+                    y=["Crime Count", "Rolling Avg (3h)"],
+                    markers=True,
+                    title="Crime Count by Hour",
+                )
+                fig.update_layout(xaxis_title="Hour", yaxis_title="Count", margin=dict(l=10, r=10, t=50, b=10))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.line_chart(trend_frame)
         except Exception as err:
             st.error(f"Line chart rendering failed: {err}")
 
@@ -459,18 +602,36 @@ with tab_advanced:
         },
         index=hour_counts.index,
     )
-    st.line_chart(trend_df)
+    if px is not None:
+        trend_plot = trend_df.reset_index().rename(columns={"index": "Hour"})
+        fig = px.line(
+            trend_plot,
+            x="Hour",
+            y=["Crime Count", "Rolling Avg (3h)"],
+            markers=True,
+            title="Crime Trend Analysis",
+        )
+        fig.update_layout(xaxis_title="Hour", yaxis_title="Count", margin=dict(l=10, r=10, t=50, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.line_chart(trend_df)
 
     st.subheader("Crime Probability Analysis")
     total = hour_counts.sum()
     prob = hour_counts / total if total > 0 else hour_counts
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.bar(prob.index, prob.values, color="teal")
-    ax.set_title("Crime Probability by Hour")
-    ax.set_xlabel("Hour")
-    ax.set_ylabel("Probability")
-    ax.set_xticks(range(0, 24))
-    st.pyplot(fig)
+    if px is not None:
+        prob_df = pd.DataFrame({"Hour": prob.index, "Probability": prob.values})
+        fig = px.bar(prob_df, x="Hour", y="Probability", title="Crime Probability by Hour")
+        fig.update_layout(xaxis_title="Hour", yaxis_title="Probability", margin=dict(l=10, r=10, t=50, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.bar(prob.index, prob.values, color="teal")
+        ax.set_title("Crime Probability by Hour")
+        ax.set_xlabel("Hour")
+        ax.set_ylabel("Probability")
+        ax.set_xticks(range(0, 24))
+        st.pyplot(fig)
 
     st.subheader("Correlation Insights")
     corr_df = pd.DataFrame({"Hour": hour_counts.index, "Crime Count": hour_counts.values})
@@ -480,61 +641,34 @@ with tab_advanced:
     else:
         st.info(f"Correlation between hour and crime count: {corr_value:.3f}")
 
-    st.subheader("Top Crime Locations (Simulated clustering)")
+    st.subheader("Crime Clusters")
     if not SKLEARN_AVAILABLE or pdk is None:
-        st.info("Install scikit-learn and pydeck to view clustering hotspots.")
-    else:
+        show_optional_dependency_warning()
+    if SKLEARN_AVAILABLE:
         clusters = min(6, max(2, len(filtered_df) // 250 + 2))
         cluster_df = compute_clusters(filtered_df, clusters)
         if cluster_df.empty:
             st.info("Not enough data points for clustering.")
         else:
-            cluster_palette = build_crime_palette([f"Cluster {c}" for c in sorted(cluster_df["Cluster"].unique())])
-            cluster_df["Color"] = cluster_df["Cluster"].apply(
-                lambda c: cluster_palette.get(f"Cluster {c}", [90, 140, 240, 190])
-            )
-
-            view_state = pdk.ViewState(
-                latitude=28.6139,
-                longitude=77.2090,
-                zoom=10,
-                pitch=35,
-            )
-            cluster_layer = pdk.Layer(
-                "ScatterplotLayer",
-                data=cluster_df,
-                get_position="[Longitude, Latitude]",
-                get_fill_color="Color",
-                get_radius=170,
-                pickable=True,
-            )
-            st.pydeck_chart(
-                pdk.Deck(
-                    map_style="mapbox://styles/mapbox/light-v10",
-                    initial_view_state=view_state,
-                    layers=[cluster_layer],
-                    tooltip={"text": "Cluster: {Cluster}\nCrime: {Crime Description}\nHour: {Hour}"},
-                )
-            )
+            render_cluster_visualization(cluster_df)
 
     st.subheader("ML Insights")
     if not SKLEARN_AVAILABLE:
-        st.info("Install scikit-learn to enable ML insights.")
+        show_optional_dependency_warning()
     else:
         accuracy, importance_df = compute_ml_insights(filtered_df)
         if accuracy is None or importance_df.empty:
             st.info("Not enough data diversity to train RandomForest.")
         else:
-            ml_col1, ml_col2 = st.columns([1, 2])
-            ml_col1.metric("RandomForest Accuracy", f"{accuracy:.3f}")
-            ml_col2.bar_chart(importance_df.set_index("Feature"))
+            st.metric("RandomForest Accuracy", f"{accuracy:.3f}")
+            render_feature_importance_chart(importance_df)
 
 
 with tab_map:
     st.header("🗺️ Smart Crime Map")
 
     if pdk is None:
-        st.warning("pydeck is required for map rendering.")
+        show_optional_dependency_warning()
     else:
         mode = st.radio(
             "Map View Mode",
