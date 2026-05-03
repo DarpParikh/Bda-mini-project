@@ -851,7 +851,11 @@ def build_map_data(frame: pd.DataFrame, mode: str) -> tuple[pd.DataFrame, list[t
 def render_map_section(frame: pd.DataFrame) -> None:
     st.subheader("Crime Map")
 
-    mode = st.radio("Map View Mode", ["All Crimes", "By Hour Intensity", "By Crime Type"], horizontal=True)
+    mode = st.radio(
+        "Map View Mode",
+        ["All Crimes", "By Hour Intensity", "By Crime Type"],
+        horizontal=True,
+    )
     map_frame, legend_items = build_map_data(frame, mode)
     if map_frame.empty:
         st.warning("No data available for selected filters")
@@ -873,6 +877,7 @@ def render_map_section(frame: pd.DataFrame) -> None:
                 get_radius=140,
                 pickable=True,
             )
+
             tooltip_text = "Crime: {Crime Description}\nHour: {Hour}"
             if mode == "By Hour Intensity":
                 tooltip_text = "Crime: {Crime Description}\nHour: {Hour}\nIntensity: {Intensity}"
@@ -886,24 +891,22 @@ def render_map_section(frame: pd.DataFrame) -> None:
             )
         except Exception:
             if px is not None:
-                color_series = map_frame["Crime Description"] if mode == "By Crime Type" else map_frame["Hour"].astype(str)
                 fig = px.scatter(
                     map_frame,
                     x="Longitude",
                     y="Latitude",
-                    color=color_series,
+                    color=map_frame["Crime Description"] if mode == "By Crime Type" else map_frame["Hour"].astype(str),
                     hover_data={"Crime Description": True, "Hour": True, "Latitude": False, "Longitude": False},
                     title="Crime Map",
                 )
                 fig.update_layout(margin=dict(l=10, r=10, t=50, b=10), xaxis_title="Longitude", yaxis_title="Latitude")
                 st.plotly_chart(fig, use_container_width=True)
     elif px is not None:
-        color_series = map_frame["Crime Description"] if mode == "By Crime Type" else map_frame["Hour"].astype(str)
         fig = px.scatter(
             map_frame,
             x="Longitude",
             y="Latitude",
-            color=color_series,
+            color=map_frame["Crime Description"] if mode == "By Crime Type" else map_frame["Hour"].astype(str),
             hover_data={"Crime Description": True, "Hour": True, "Latitude": False, "Longitude": False},
             title="Crime Map",
         )
@@ -1093,7 +1096,7 @@ st.info("Explore crime patterns across time, space, clustering, and model-driven
 st.sidebar.header("Dashboard Controls")
 crime_options = sorted(raw_df["Crime Description"].astype(str).unique().tolist())
 selected_crimes = st.sidebar.multiselect("Crime Description", options=crime_options, default=crime_options)
-selected_hours = st.sidebar.slider("Hour range", min_value=0, max_value=23, value=(0, 23))
+hour_range = st.sidebar.slider("Select Hour Range", min_value=0, max_value=23, value=(0, 23))
 search_text = st.sidebar.text_input("Search crime name", placeholder="Type to filter crime names")
 sort_mode = st.sidebar.selectbox(
     "Sort filtered table",
@@ -1134,9 +1137,17 @@ if selected_crimes:
 else:
     filtered_df = filtered_df.iloc[0:0]
 
-filtered_df = filtered_df[filtered_df["Hour"].between(selected_hours[0], selected_hours[1])]
+filtered_df = filtered_df[
+    (filtered_df["Hour"] >= hour_range[0]) &
+    (filtered_df["Hour"] <= hour_range[1])
+]
 if search_text.strip():
     filtered_df = filtered_df[filtered_df["Crime Description"].str.contains(search_text.strip(), case=False, na=False)]
+
+st.write("Selected Range:", hour_range)
+st.write("Unique Hours in Filtered Data:", sorted(filtered_df["Hour"].unique()))
+
+filtered_df = filtered_df.sort_values(by="Hour")
 
 filtered_df = apply_sort(filtered_df, sort_mode)
 
@@ -1172,11 +1183,13 @@ with tab_overview:
 
     st.divider()
     st.subheader("Data Explorer")
-    st.dataframe(filtered_df[selected_columns].head(row_limit), use_container_width=True)
+    st.write("Min Hour:", filtered_df["Hour"].min())
+    st.write("Max Hour:", filtered_df["Hour"].max())
+    st.dataframe(filtered_df[selected_columns], use_container_width=True)
 
     if show_raw_data:
         st.subheader("Raw Processed Data")
-        st.dataframe(raw_df[selected_columns].head(row_limit), use_container_width=True)
+        st.dataframe(filtered_df[selected_columns], use_container_width=True)
 
     overview_col1, overview_col2 = st.columns(2)
     with overview_col1:
@@ -1192,7 +1205,7 @@ with tab_overview:
 
     with overview_col2:
         st.subheader("Filtered Dataset Snapshot")
-        st.dataframe(filtered_df[selected_columns].head(row_limit), use_container_width=True)
+        st.dataframe(filtered_df[selected_columns], use_container_width=True)
 
     download_col1, download_col2 = st.columns(2)
     download_col1.download_button(
